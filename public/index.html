@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Codespace Control</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-title" id="topbarTitle">Codespaces</div>
+    <button class="icon-btn" id="refreshBtn" title="Refresh">⟳</button>
+  </header>
+
+  <!-- Screen: Codespaces -->
+  <section class="screen" id="screen-codespaces">
+    <div class="account-chip" id="activeAccountChip">
+      <span class="dot"></span>
+      <span id="activeAccountLabel">No account selected</span>
+    </div>
+
+    <div id="codespaceList" class="list"></div>
+
+    <div class="empty-state" id="codespacesEmpty" style="display:none">
+      <div class="empty-icon">🛰️</div>
+      <p>No codespaces yet</p>
+    </div>
+
+    <button class="fab" id="newCodespaceBtn">+ New Codespace</button>
+  </section>
+
+  <!-- Screen: Tokens -->
+  <section class="screen hidden" id="screen-tokens">
+    <div class="section-label">Saved GitHub Accounts</div>
+    <div id="tokenList" class="list"></div>
+
+    <div class="card form-card">
+      <div class="section-label">Add Account</div>
+      <input class="field" id="tokenLabelInput" placeholder="Label (e.g. Personal, Work)" />
+      <input class="field" id="tokenValueInput" placeholder="GitHub token (ghp_...)" type="password" />
+      <button class="btn primary full" id="saveTokenBtn">Save Account</button>
+    </div>
+  </section>
+
+  <!-- Screen: Billing -->
+  <section class="screen hidden" id="screen-billing">
+    <div class="section-label">Codespaces Usage This Month</div>
+    <div id="billingList" class="list"></div>
+    <div class="empty-state" id="billingEmpty" style="display:none">
+      <div class="empty-icon">💳</div>
+      <p>No accounts saved yet</p>
+    </div>
+    <p class="billing-note">Hours come straight from GitHub's billing API (<code>/users/{login}/settings/billing/usage</code>) and reflect GitHub's own metering — it can lag live usage by up to an hour.</p>
+  </section>
+
+  <!-- Screen: Terminal -->
+  <section class="screen hidden" id="screen-terminal">
+    <div class="section-label" id="terminalTargetLabel">Select a codespace to connect</div>
+    <div class="terminal-tabs" id="terminalTabs"></div>
+    <div id="terminalContainer"></div>
+    <div class="terminal-toolbar">
+      <button class="btn" id="terminalReconnectBtn">Reconnect</button>
+      <button class="btn danger" id="terminalCloseBtn">Disconnect</button>
+      <button class="btn danger" id="terminalKillBtn">Kill</button>
+    </div>
+  </section>
+
+  <!-- New Codespace modal -->
+  <div class="modal hidden" id="newCsModal">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <span>New Codespace</span>
+        <button class="icon-btn" id="closeNewCsModal">✕</button>
+      </div>
+      <input class="field" id="csOwnerInput" placeholder="Owner (e.g. remaru80-star)" />
+      <input class="field" id="csRepoInput" placeholder="Repo (e.g. my-bot)" />
+      <input class="field" id="csRefInput" placeholder="Branch (default: main)" />
+      <select class="field" id="csMachineInput">
+        <option value="basicLinux32gb">2-core, 8GB RAM, 32GB storage</option>
+        <option value="standardLinux32gb">4-core, 16GB RAM, 32GB storage</option>
+        <option value="premiumLinux">8-core, 32GB RAM, 64GB storage</option>
+        <option value="largePremiumLinux">16-core, 64GB RAM, 128GB storage</option>
+      </select>
+      <button class="btn primary full" id="createCsBtn">Create & Start</button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast hidden" id="toast"></div>
+
+  <!-- Bottom nav -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-screen="codespaces">
+      <span class="nav-icon">🖥️</span><span>Codespaces</span>
+    </button>
+    <button class="nav-btn" data-screen="tokens">
+      <span class="nav-icon">🔑</span><span>Accounts</span>
+    </button>
+    <button class="nav-btn" data-screen="terminal">
+      <span class="nav-icon">⌨️</span><span>Terminal</span>
+    </button>
+    <button class="nav-btn" data-screen="billing">
+      <span class="nav-icon">💳</span><span>Billing</span>
+    </button>
+  </nav>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
