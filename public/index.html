@@ -35,10 +35,11 @@
     <button class="fab" id="newCodespaceBtn">+ New Codespace</button>
   </section>
 
-  <!-- Screen: Tokens -->
+  <!-- Screen: Tokens (Accounts, with billing merged in per account) -->
   <section class="screen hidden" id="screen-tokens">
     <div class="section-label">Saved GitHub Accounts</div>
     <div id="tokenList" class="list"></div>
+    <p class="billing-note">Usage hours come from GitHub's billing API and can lag live usage by up to an hour.</p>
 
     <div class="card form-card">
       <div class="section-label">Add Account</div>
@@ -48,22 +49,41 @@
     </div>
   </section>
 
-  <!-- Screen: Billing -->
-  <section class="screen hidden" id="screen-billing">
-    <div class="section-label">Codespaces Usage This Month</div>
-    <div id="billingList" class="list"></div>
-    <div class="empty-state" id="billingEmpty" style="display:none">
-      <div class="empty-icon">💳</div>
-      <p>No accounts saved yet</p>
+  <!-- Screen: Schedule (Auto-Switch) -->
+  <section class="screen hidden" id="screen-schedule">
+    <div class="section-label">Auto-Switch Schedules</div>
+    <div id="scheduleList" class="list"></div>
+    <div class="empty-state" id="scheduleEmpty" style="display:none">
+      <div class="empty-icon">⏱️</div>
+      <p>No schedules yet</p>
     </div>
-    <p class="billing-note">Hours come straight from GitHub's billing API (<code>/users/{login}/settings/billing/usage</code>) and reflect GitHub's own metering — it can lag live usage by up to an hour.</p>
+    <button class="fab" id="newScheduleBtn">+ New Schedule</button>
+  </section>
+
+  <!-- Screen: Logs (read-only) -->
+  <section class="screen hidden" id="screen-logs">
+    <div class="log-toolbar">
+      <select class="field" id="logScheduleSelect"></select>
+      <button class="btn" id="copyLogBtn">Copy</button>
+    </div>
+    <div id="logView" class="log-view"></div>
+    <div class="empty-state" id="logEmpty" style="display:none">
+      <div class="empty-icon">📜</div>
+      <p>No schedules yet — create one in the Schedule tab</p>
+    </div>
   </section>
 
   <!-- Screen: Terminal -->
   <section class="screen hidden" id="screen-terminal">
     <div class="section-label" id="terminalTargetLabel">Select a codespace to connect</div>
     <div class="terminal-tabs" id="terminalTabs"></div>
-    <div id="terminalContainer"></div>
+    <div class="term-live-banner" id="termLiveBanner" style="display:none">Scrolled back — tap to return to live</div>
+    <div class="term-wrap">
+      <div id="terminalContainer"></div>
+      <div class="term-scrollbar" id="termScrollbar">
+        <div class="term-scrollbar-thumb" id="termScrollbarThumb"></div>
+      </div>
+    </div>
     <div class="terminal-toolbar">
       <button class="btn" id="terminalReconnectBtn">Reconnect</button>
       <button class="btn danger" id="terminalCloseBtn">Disconnect</button>
@@ -91,6 +111,49 @@
     </div>
   </div>
 
+  <!-- New Schedule modal -->
+  <div class="modal hidden" id="newScheduleModal">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <span id="scheduleModalTitle">New Schedule</span>
+        <button class="icon-btn" id="closeScheduleModal">✕</button>
+      </div>
+      <input class="field" id="schOwnerInput" placeholder="Owner (e.g. remaru80-star)" />
+      <input class="field" id="schRepoInput" placeholder="Repo (e.g. my-bot)" />
+      <input class="field" id="schRefInput" placeholder="Branch (default: main)" />
+      <select class="field" id="schMachineInput">
+        <option value="basicLinux32gb">2-core, 8GB RAM, 32GB storage</option>
+        <option value="standardLinux32gb">4-core, 16GB RAM, 32GB storage</option>
+        <option value="premiumLinux">8-core, 32GB RAM, 64GB storage</option>
+        <option value="largePremiumLinux">16-core, 64GB RAM, 128GB storage</option>
+      </select>
+
+      <div class="section-label">Switch timing</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-mode="timer" id="modeTimerBtn">Fixed timer</button>
+        <button class="mode-btn" data-mode="clock" id="modeClockBtn">Daily clock time</button>
+      </div>
+      <input class="field" id="schTimerInput" type="number" min="1" placeholder="Switch every N minutes" />
+      <input class="field hidden" id="schClockInput" type="time" />
+      <p class="hint-text hidden" id="schClockHint"></p>
+
+      <div class="section-label">When switching, old codespace should</div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-onswitch="stop" id="onSwitchStopBtn">Stop (resume next time)</button>
+        <button class="mode-btn" data-onswitch="delete" id="onSwitchDeleteBtn">Delete (recreate next time)</button>
+      </div>
+
+      <div class="section-label">Commands to run on start (in order — each step runs in a real shell, so multi-line blocks like a heredoc work)</div>
+      <div id="schCommandList" class="command-list"></div>
+      <div class="command-add-row">
+        <textarea class="field" id="schCommandInput" rows="3" placeholder="e.g. python3 bot.py&#10;or a multi-line block:&#10;cat > .env << 'EOF'&#10;KEY=value&#10;EOF"></textarea>
+        <button class="btn" id="schCommandAddBtn">Add Step</button>
+      </div>
+
+      <button class="btn primary full" id="saveScheduleBtn">Save Schedule</button>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div class="toast hidden" id="toast"></div>
 
@@ -105,8 +168,11 @@
     <button class="nav-btn" data-screen="terminal">
       <span class="nav-icon">⌨️</span><span>Terminal</span>
     </button>
-    <button class="nav-btn" data-screen="billing">
-      <span class="nav-icon">💳</span><span>Billing</span>
+    <button class="nav-btn" data-screen="schedule">
+      <span class="nav-icon">⏱️</span><span>Schedule</span>
+    </button>
+    <button class="nav-btn" data-screen="logs">
+      <span class="nav-icon">📜</span><span>Logs</span>
     </button>
   </nav>
 

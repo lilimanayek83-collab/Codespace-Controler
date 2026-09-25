@@ -2,10 +2,13 @@ import os
 import re
 import json
 import hmac
+import time
+import base64
 import hashlib
 import urllib.parse
 import asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
@@ -457,6 +460,336 @@ async def delete_codespace(name: str, request: Request):
         task.cancel()
     await gh_request(token, f"/user/codespaces/{name}", method="DELETE")
     return {"ok": True}
+
+
+# ---------- Auto-Switch schedules ----------
+# A schedule owns one repo. Every SCHEDULE_POLL_SECONDS the background loop
+# checks whether it's due (elapsed timer, or the daily clock time in the
+# user's own timezone) and if so: stops/deletes the schedule's current
+# codespace per on_switch, brings up a (re)started or brand-new one, waits
+# for it to become Available, then runs the saved commands on it one by one,
+# writing everything to schedule_logs (read-only from the Mini App's POV —
+# there is no endpoint that accepts input for a log).
+SCHEDULE_POLL_SECONDS = 30
+
+
+@app.get("/api/schedules")
+async def list_schedules(request: Request):
+    user = require_user(request)
+    cursor = db.schedules.find({"telegramId": user["id"]})
+    out = []
+    async for d in cursor:
+        d["_id"] = str(d["_id"])
+        out.append(d)
+    return out
+
+
+@app.post("/api/schedules")
+async def create_schedule(request: Request):
+    user = require_user(request)
+    body = await request.json()
+    owner, repo = body.get("owner"), body.get("repo")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo required")
+    owner, repo = _parse_owner_repo(owner.strip(), repo.strip())
+    mode = body.get("mode") if body.get("mode") in ("timer", "clock") else "timer"
+    on_switch = body.get("on_switch") if body.get("on_switch") in ("stop", "delete") else "stop"
+    commands = [c.strip() for c in (body.get("commands") or []) if c and c.strip()]
+
+    doc = {
+        "telegramId": user["id"],
+        "owner": owner, "repo": repo,
+        "ref": (body.get("ref") or "main").strip(),
+        "machine": body.get("machine") or "basicLinux32gb",
+        "mode": mode,
+        "timer_minutes": int(body["timer_minutes"]) if body.get("timer_minutes") else None,
+        "clock_time": body.get("clock_time") or None,  # "HH:MM", in `timezone` below
+        "timezone": body.get("timezone") or "UTC",      # IANA name, e.g. "America/New_York"
+        "on_switch": on_switch,
+        "commands": commands,
+        "enabled": True,
+        "current_codespace_name": None,
+        "last_switch_at": None,
+        "last_run_key": None,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = await db.schedules.insert_one(doc)
+    doc["_id"] = str(result.inserted_id)
+    return doc
+
+
+@app.patch("/api/schedules/{sid}")
+async def update_schedule(sid: str, request: Request):
+    user = require_user(request)
+    oid = to_object_id(sid)
+    body = await request.json()
+    allowed = {
+        "owner", "repo", "ref", "machine", "mode", "timer_minutes",
+        "clock_time", "timezone", "on_switch", "commands", "enabled",
+    }
+    update = {k: v for k, v in body.items() if k in allowed}
+    if "commands" in update:
+        update["commands"] = [c.strip() for c in (update["commands"] or []) if c and c.strip()]
+    if "owner" in update or "repo" in update:
+        doc = await db.schedules.find_one({"_id": oid, "telegramId": user["id"]})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        o, r = _parse_owner_repo(update.get("owner", doc["owner"]).strip(), update.get("repo", doc["repo"]).strip())
+        update["owner"], update["repo"] = o, r
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    result = await db.schedules.update_one({"_id": oid, "telegramId": user["id"]}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {"ok": True}
+
+
+@app.delete("/api/schedules/{sid}")
+async def delete_schedule(sid: str, request: Request):
+    user = require_user(request)
+    oid = to_object_id(sid)
+    result = await db.schedules.delete_one({"_id": oid, "telegramId": user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    await db.schedule_logs.delete_many({"scheduleId": sid})
+    return {"ok": True}
+
+
+@app.post("/api/schedules/{sid}/run-now")
+async def run_schedule_now(sid: str, request: Request):
+    user = require_user(request)
+    oid = to_object_id(sid)
+    doc = await db.schedules.find_one({"_id": oid, "telegramId": user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    doc["_id"] = str(doc["_id"])
+    asyncio.create_task(_run_switch(doc))
+    return {"ok": True}
+
+
+@app.get("/api/schedules/{sid}/logs")
+async def get_schedule_logs(sid: str, request: Request):
+    user = require_user(request)
+    oid = to_object_id(sid)
+    owner_doc = await db.schedules.find_one({"_id": oid, "telegramId": user["id"]}, {"_id": 1})
+    if not owner_doc:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    since = float(request.query_params.get("since", 0) or 0)
+    cursor = db.schedule_logs.find({"scheduleId": sid, "ts": {"$gt": since}}).sort("ts", 1).limit(1000)
+    return [{"ts": d["ts"], "line": d["line"]} async for d in cursor]
+
+
+async def _log(schedule_id: str, message: str):
+    await db.schedule_logs.insert_one({"scheduleId": schedule_id, "ts": time.time(), "line": message})
+    count = await db.schedule_logs.count_documents({"scheduleId": schedule_id})
+    if count > 500:
+        old_cursor = db.schedule_logs.find({"scheduleId": schedule_id}).sort("ts", 1).limit(count - 500)
+        old_ids = [d["_id"] async for d in old_cursor]
+        if old_ids:
+            await db.schedule_logs.delete_many({"_id": {"$in": old_ids}})
+
+
+async def _wait_codespace_available(token: str, name: str, timeout: int = 480) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data = await gh_request(token, f"/user/codespaces/{name}")
+            if data.get("state") == "Available":
+                return True
+        except HTTPException:
+            pass
+        await asyncio.sleep(10)
+    return False
+
+
+AUTO_TMUX_SESSION = "cs-auto"
+
+
+async def _ensure_auto_session(token: str, name: str):
+    """Creates (if missing) the persistent tmux session that scheduled
+    commands run in — the exact same session name the Terminal tab attaches
+    to when its terminalId is "auto" (terminal_ws below builds tmux session
+    names as f"cs-{terminal_id}"), so commands actually execute in a real,
+    watchable, typeable shell instead of a disconnected one-shot exec."""
+    cmd = (
+        "command -v tmux >/dev/null 2>&1 || "
+        "(sudo apt-get update -qq && sudo apt-get install -y -qq tmux); "
+        "grep -q '^set -g mouse on' ~/.tmux.conf 2>/dev/null || echo 'set -g mouse on' >> ~/.tmux.conf; "
+        f"tmux has-session -t {AUTO_TMUX_SESSION} 2>/dev/null || tmux new-session -d -s {AUTO_TMUX_SESSION}"
+    )
+    await _ssh_exec(token, name, cmd, timeout=90)
+
+
+async def _tmux_capture(token: str, name: str, lines: int = 2000) -> str:
+    return await _ssh_exec(
+        token, name,
+        f"tmux capture-pane -t {AUTO_TMUX_SESSION} -p -S -{lines} 2>/dev/null || true",
+        timeout=20,
+    )
+
+
+def _pane_diff(before: str, after: str) -> str:
+    """Best-effort diff of two tmux capture-pane snapshots: the new lines
+    are whatever got appended past the previous snapshot's line count."""
+    b_lines, a_lines = before.splitlines(), after.splitlines()
+    if a_lines[: len(b_lines)] == b_lines:
+        return "\n".join(a_lines[len(b_lines):]).strip("\n")
+    return "\n".join(a_lines[-80:])  # pane scrolled/cleared — fall back to the tail
+
+
+async def _run_switch(schedule: dict):
+    """Stops/deletes the schedule's current codespace (per on_switch),
+    (re)starts or creates the replacement, waits for it to come online, then
+    runs the saved commands on it one by one. Every step is written to
+    schedule_logs via _log()."""
+    sid = schedule["_id"]
+    telegram_id = schedule["telegramId"]
+    token = await get_active_token(telegram_id)
+    if not token:
+        await _log(sid, "No active GitHub account selected — switch skipped.")
+        return
+
+    owner, repo = schedule["owner"], schedule["repo"]
+    ref = schedule.get("ref") or "main"
+    machine = schedule.get("machine") or "basicLinux32gb"
+    on_switch = schedule.get("on_switch") or "stop"
+    old_name = schedule.get("current_codespace_name")
+
+    await _log(sid, f"--- Switch triggered ({'delete' if on_switch == 'delete' else 'stop'} old codespace) ---")
+
+    if old_name:
+        try:
+            if on_switch == "delete":
+                await gh_request(token, f"/user/codespaces/{old_name}", method="DELETE")
+                await _log(sid, f"Deleted {old_name}")
+            else:
+                await gh_request(token, f"/user/codespaces/{old_name}/stop", method="POST")
+                await _log(sid, f"Stopped {old_name}")
+        except Exception as e:
+            await _log(sid, f"Could not stop/delete {old_name}: {e}")
+        key = _keepalive_key(telegram_id, old_name)
+        task = keepalive_tasks.pop(key, None)
+        if task:
+            task.cancel()
+
+    try:
+        me = await gh_request(token, "/user")
+        my_login = me["login"]
+
+        new_cs = None
+        if on_switch == "stop":
+            existing = await _find_existing_codespace(token, owner, repo)
+            if existing:
+                new_cs = await gh_request(token, f"/user/codespaces/{existing['name']}/start", method="POST")
+        if not new_cs:
+            target_owner, target_repo = await _ensure_own_repo(token, my_login, owner, repo)
+            new_cs = await gh_request(
+                token, f"/repos/{target_owner}/{target_repo}/codespaces", method="POST",
+                json_body={"ref": ref, "machine": machine, "idle_timeout_minutes": 240},
+            )
+
+        name = new_cs["name"]
+        await _log(sid, f"New codespace: {name} — waiting for it to come online...")
+        await db.schedules.update_one(
+            {"_id": to_object_id(sid)},
+            {"$set": {"current_codespace_name": name, "last_switch_at": datetime.now(timezone.utc)}},
+        )
+
+        if not await _wait_codespace_available(token, name):
+            await _log(sid, f"Timed out waiting for {name} to become Available.")
+            return
+        await _log(sid, f"{name} is online.")
+
+        commands = schedule.get("commands") or []
+        if commands:
+            await _ensure_auto_session(token, name)
+            await _log(sid, 'Startup session ready — open Terminal → tab "auto" to watch or type into it live.')
+        for cmd in commands:
+            cmd_lines = cmd.splitlines() or [cmd]
+            label = cmd_lines[0] if len(cmd_lines) == 1 else f"{cmd_lines[0]} ...(+{len(cmd_lines) - 1} more lines)"
+            await _log(sid, f"$ {label}")
+            before = await _tmux_capture(token, name)
+            b64 = base64.b64encode((cmd + "\n").encode()).decode()
+            await _ssh_exec(
+                token, name,
+                f"tmux send-keys -t {AUTO_TMUX_SESSION} 'echo {b64} | base64 -d | bash' Enter",
+                timeout=20,
+            )
+            # Poll the live pane until its output stops changing (or we hit
+            # the cap) instead of guessing a fixed sleep — this is the same
+            # pane the "auto" Terminal tab attaches to, so whatever the
+            # command actually does (cd, env vars, background jobs) sticks.
+            last, stable = before, 0
+            for _ in range(80):  # ~4 min cap per step
+                await asyncio.sleep(3)
+                snap = await _tmux_capture(token, name)
+                if snap == last:
+                    stable += 1
+                    if stable >= 2:
+                        break
+                else:
+                    stable, last = 0, snap
+            for line in _pane_diff(before, last).splitlines():
+                if line.strip():
+                    await _log(sid, line)
+        if commands:
+            await _log(sid, "All commands finished.")
+    except Exception as e:
+        await _log(sid, f"Switch failed: {e}")
+
+
+async def _maybe_trigger(sched: dict):
+    sid = str(sched["_id"])
+    sched["_id"] = sid
+    now = datetime.now(timezone.utc)
+
+    if sched.get("mode") == "clock":
+        clock_time = sched.get("clock_time")
+        if not clock_time:
+            return
+        try:
+            tz = ZoneInfo(sched.get("timezone") or "UTC")
+        except Exception:
+            tz = ZoneInfo("UTC")
+        local_now = now.astimezone(tz)
+        try:
+            hh, mm = (int(p) for p in clock_time.split(":"))
+        except Exception:
+            return
+        target = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        run_key = target.strftime("%Y-%m-%d")
+        if local_now >= target and sched.get("last_run_key") != run_key:
+            await db.schedules.update_one({"_id": to_object_id(sid)}, {"$set": {"last_run_key": run_key}})
+            await _run_switch(sched)
+    else:  # "timer"
+        minutes = sched.get("timer_minutes")
+        if not minutes:
+            return
+        last = sched.get("last_switch_at")
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        due = last is None or (now - last).total_seconds() >= minutes * 60
+        if due:
+            await _run_switch(sched)
+
+
+async def _scheduler_loop():
+    while True:
+        try:
+            cursor = db.schedules.find({"enabled": True})
+            async for sched in cursor:
+                try:
+                    await _maybe_trigger(sched)
+                except Exception as e:
+                    print(f"[scheduler] error on {sched.get('_id')}: {e}")
+        except Exception as e:
+            print(f"[scheduler] loop error: {e}")
+        await asyncio.sleep(SCHEDULE_POLL_SECONDS)
+
+
+@app.on_event("startup")
+async def _start_scheduler():
+    asyncio.create_task(_scheduler_loop())
 
 
 # One-shot command execution fallback (no interactive shell) via `gh` CLI.

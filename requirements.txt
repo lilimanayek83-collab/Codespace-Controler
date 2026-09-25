@@ -6,3 +6,4 @@ python-dotenv
 python-telegram-bot
 httpx
 ptyprocess
+tzdata
