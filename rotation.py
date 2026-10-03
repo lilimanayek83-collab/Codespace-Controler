@@ -25,6 +25,17 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+_TZ_ALIASES = {  # legacy names browsers still send; missing on Ubuntu 24.04 without tzdata-legacy
+    "Asia/Calcutta": "Asia/Kolkata", "Asia/Katmandu": "Asia/Kathmandu", "Asia/Saigon": "Asia/Ho_Chi_Minh",
+    "Asia/Rangoon": "Asia/Yangon", "Asia/Dacca": "Asia/Dhaka", "Europe/Kiev": "Europe/Kyiv",
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires", "Atlantic/Faeroe": "Atlantic/Faroe",
+}
+
+
+def _zone(name):
+    name = _TZ_ALIASES.get(name, name)
+    return name, ZoneInfo(name)
+
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, HTTPException, Request
@@ -97,7 +108,7 @@ def _next_switch(cfg: dict):
     if mode == "clock":
         try:
             hh, mm = (int(x) for x in cfg["clockTime"].split(":"))
-            tz = ZoneInfo(cfg.get("timezone") or "UTC")
+            _, tz = _zone(cfg.get("timezone") or "UTC")
         except Exception:
             return None
         now_local = datetime.now(tz)
@@ -154,7 +165,7 @@ def _public(cfg: dict) -> dict:
         "status": cfg.get("status", "idle"), "log": cfg.get("log", []),
         "autoSwitchMinutes": cfg.get("autoSwitchMinutes", 0),
         "switchMode": _mode(cfg), "clockTime": cfg.get("clockTime", ""),
-        "timezone": cfg.get("timezone", ""),
+        "timezone": cfg.get("timezone", ""), "tzMode": cfg.get("tzMode", "auto"),
         "switchAt": (sw.isoformat() + "Z") if sw else None,
         "active": cfg.get("active"),
     }
@@ -462,7 +473,7 @@ async def _validate(uid: int, body: dict) -> dict:
         if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
             raise HTTPException(400, "Clock: set a time like 04:00")
         try:
-            ZoneInfo(tz_name)
+            tz_name, _ = _zone(tz_name)
         except Exception:
             raise HTTPException(400, f"Unknown timezone: {tz_name}")
     return {
@@ -472,7 +483,7 @@ async def _validate(uid: int, body: dict) -> dict:
         "onSwitch": on_switch,
         "commands": group_commands(body.get("commands") or []),
         "accounts": accounts, "autoSwitchMinutes": mins,
-        "switchMode": mode, "clockTime": clock_time, "timezone": tz_name,
+        "switchMode": mode, "clockTime": clock_time, "timezone": tz_name, "tzMode": "manual" if body.get("tzMode") == "manual" else "auto",
     }
 
 
