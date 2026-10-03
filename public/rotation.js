@@ -13,6 +13,7 @@ const MACHINES = [
   ['largePremiumLinux', '16-core, 64GB RAM'],
 ];
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const TZ_LIST = (typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []).concat(['UTC']);
 const svc = { view: 'list', list: [], cur: null, tokens: [], draft: null, poll: null };
 const root = () => document.getElementById('svcRoot');
 const tokLabel = (id) => (svc.tokens.find((t) => t._id === id) || {}).label || '?';
@@ -66,7 +67,7 @@ function renderList() {
     svcRefresh();
   }));
   document.getElementById('svcNew').addEventListener('click', () => {
-    svc.draft = { id: null, name: '', repo: '', ref: '', machine: 'standardLinux32gb', onSwitch: 'stop', commandsText: '', accounts: [svc.tokens[0]?._id || ''], autoSwitchMinutes: 30, switchMode: 'off', clockTime: '04:00', timezone: BROWSER_TZ };
+    svc.draft = { id: null, name: '', repo: '', ref: '', machine: 'standardLinux32gb', onSwitch: 'stop', commandsText: '', accounts: [svc.tokens[0]?._id || ''], autoSwitchMinutes: 30, switchMode: 'off', clockTime: '04:00', timezone: BROWSER_TZ, tzMode: 'auto' };
     svc.view = 'edit';
     svcRender();
   });
@@ -112,7 +113,7 @@ function renderDetail() {
   act('svcStop', `/api/services/${c.id}/stop`);
   root().querySelectorAll('[data-ptr]').forEach((b) => b.addEventListener('click', () => svcPost(`/api/services/${c.id}/pointer`, { index: +b.dataset.ptr })));
   document.getElementById('svcEdit').addEventListener('click', () => {
-    svc.draft = { id: c.id, name: c.name, repo: c.repo, ref: c.ref, machine: c.machine, onSwitch: c.onSwitch, commandsText: c.commands.join('\n'), accounts: [...c.accounts], autoSwitchMinutes: c.autoSwitchMinutes || 30, switchMode: c.switchMode, clockTime: c.clockTime || '04:00', timezone: c.timezone || BROWSER_TZ };
+    svc.draft = { id: c.id, name: c.name, repo: c.repo, ref: c.ref, machine: c.machine, onSwitch: c.onSwitch, commandsText: c.commands.join('\n'), accounts: [...c.accounts], autoSwitchMinutes: c.autoSwitchMinutes || 30, switchMode: c.switchMode, clockTime: c.clockTime || '04:00', tzMode: c.tzMode === 'manual' ? 'manual' : 'auto', timezone: c.tzMode === 'manual' ? (c.timezone || BROWSER_TZ) : BROWSER_TZ };
     svc.view = 'edit';
     svcRender();
   });
@@ -168,7 +169,12 @@ function renderEdit() {
       ${d.switchMode === 'timer' ? `<input class="field" data-f="autoSwitchMinutes" type="number" min="1" placeholder="Minutes" value="${d.autoSwitchMinutes || 30}" />
         <p class="token-sub">Switches this many minutes after the service starts on each account.</p>` : ''}
       ${d.switchMode === 'clock' ? `<input class="field" data-f="clockTime" type="time" value="${escapeHtml(d.clockTime || '04:00')}" />
-        <input class="field" data-f="timezone" placeholder="Timezone (e.g. Asia/Kolkata)" value="${escapeHtml(d.timezone)}" />
+        <select class="field" data-f="tzMode">
+          <option value="auto" ${d.tzMode !== 'manual' ? 'selected' : ''}>Timezone: Auto — this device (${escapeHtml(BROWSER_TZ)})</option>
+          <option value="manual" ${d.tzMode === 'manual' ? 'selected' : ''}>Timezone: Manual — choose myself</option>
+        </select>
+        ${d.tzMode === 'manual' ? `<input class="field" data-f="timezone" list="tzList" autocomplete="off" placeholder="Timezone (e.g. Asia/Kolkata)" value="${escapeHtml(d.timezone)}" />
+        <datalist id="tzList">${TZ_LIST.map((z) => `<option value="${z}"></option>`).join('')}</datalist>` : ''}
         <p class="token-sub">Switches every day at this time in the timezone above.</p>` : ''}
       <div class="rot-actions"><button class="btn primary" id="svcSave">Save</button><button class="btn" id="svcCancel">Cancel</button></div>
     </div>`;
@@ -179,6 +185,8 @@ function renderEdit() {
   });
   const modeSel = box.querySelector('[data-f="switchMode"]');
   modeSel.addEventListener('change', () => renderEdit());
+  const tzSel = box.querySelector('[data-f="tzMode"]');
+  if (tzSel) tzSel.addEventListener('change', () => { if (d.tzMode === 'auto') d.timezone = BROWSER_TZ; renderEdit(); });
   box.querySelectorAll('[data-acc]').forEach((el) => el.addEventListener('change', () => { d.accounts[+el.dataset.acc] = el.value; }));
   box.querySelectorAll('#svcAccs [data-i]').forEach((row) => row.addEventListener('click', (e) => {
     const i = +row.dataset.i;
@@ -194,6 +202,7 @@ function renderEdit() {
   document.getElementById('svcCancel').addEventListener('click', () => { svc.view = d.id ? 'detail' : 'list'; svcRefresh(); });
   document.getElementById('svcSave').addEventListener('click', async () => {
     try {
+      if (d.tzMode !== 'manual') d.timezone = BROWSER_TZ;
       const body = JSON.stringify({ ...d, autoSwitchMinutes: +d.autoSwitchMinutes || 0, commands: d.commandsText.split('\n') });
       const saved = await rapi(d.id ? `/api/services/${d.id}` : '/api/services', { method: d.id ? 'PUT' : 'POST', body });
       haptic('medium');
