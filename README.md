@@ -28,6 +28,7 @@ cp .env.example .env
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+sudo apt update && sudo apt install cloudflared -y
 ```
 
 ## 3. Run
@@ -86,3 +87,7 @@ and create new ones, **Terminal** tab for a live shell into any codespace.
   sessions for your bot can reach the API.
 - Because tokens are stored unencrypted, restrict MongoDB network access
   (IP allowlist) and rotate tokens if the DB is ever exposed.
+
+
+
+  
